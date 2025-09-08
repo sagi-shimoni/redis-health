@@ -8,6 +8,8 @@ import re
 from datetime import datetime, timedelta
 import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from requests_aws4auth import AWS4Auth
+from botocore.session import Session
 
 load_dotenv()
 
@@ -42,6 +44,16 @@ _redis_cache = {
 
 # --- Session for HTTP requests ---
 _session = None
+_prom_auth = None
+
+def get_prom_auth(prom_url):
+    global _prom_auth
+    is_amazon_managed_prometheus = prom_url.startswith('https://aps-workspaces.')
+    if _prom_auth is None and is_amazon_managed_prometheus:
+        credentials = Session().get_credentials()
+        aws_region = prom_url.split('.')[1]
+        _prom_auth = AWS4Auth(region=aws_region, service='aps', refreshable_credentials=credentials)
+    return _prom_auth
 
 def get_session():
     global _session
@@ -187,7 +199,7 @@ def get_databases_for_subscription(subscription_id):
 def query_prometheus(prom_url, promql, bdb=None, cluster=None):
     try:
         session = get_session()
-        resp = session.get(f"{prom_url}/api/v1/query", params={"query": promql}, timeout=15)
+        resp = session.get(f"{prom_url}/api/v1/query", params={"query": promql}, timeout=15, auth=get_prom_auth(prom_url))
         resp.raise_for_status()
         data = resp.json()
         if data["status"] == "success" and data["data"]["result"]:
@@ -241,7 +253,7 @@ def query_prometheus_batch(prom_url, queries):
 def _execute_prometheus_query(session, request):
     """Helper function to execute a single Prometheus query"""
     try:
-        resp = session.get(request['url'], params=request['params'], timeout=15)
+        resp = session.get(request['url'], params=request['params'], timeout=15, auth=get_prom_auth(request['url']))
         resp.raise_for_status()
         data = resp.json()
         if data["status"] == "success" and data["data"]["result"]:
