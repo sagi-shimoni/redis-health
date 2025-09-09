@@ -44,16 +44,17 @@ _redis_cache = {
 
 # --- Session for HTTP requests ---
 _session = None
-_prom_auth = None
+_prom_auth = {}
 
 def get_prom_auth(prom_url):
     global _prom_auth
-    is_amazon_managed_prometheus = prom_url.startswith('https://aps-workspaces.')
-    if _prom_auth is None and is_amazon_managed_prometheus:
-        credentials = Session().get_credentials()
+    if prom_url.startswith('https://aps-workspaces.'):
         aws_region = prom_url.split('.')[1]
-        _prom_auth = AWS4Auth(region=aws_region, service='aps', refreshable_credentials=credentials)
-    return _prom_auth
+        if _prom_auth.get(aws_region) is None:
+            credentials = Session().get_credentials()
+            _prom_auth[aws_region] = AWS4Auth(region=aws_region, service='aps', refreshable_credentials=credentials)
+        return _prom_auth[aws_region]
+    return None
 
 def get_session():
     global _session
@@ -225,8 +226,9 @@ def query_prometheus_batch(prom_url, queries):
     # Create all requests
     requests_data = []
     for promql, bdb, cluster, metric_name in queries:
+        cluster_prom_url = prom_url.get(cluster) if isinstance(prom_url, dict) else prom_url
         requests_data.append({
-            'url': f"{prom_url}/api/v1/query",
+            'url': f"{cluster_prom_url}/api/v1/query",
             'params': {"query": promql},
             'metric_name': metric_name,
             'bdb': bdb,
@@ -285,7 +287,7 @@ def check_database_metrics_prometheus(cluster_label, db, thresholds):
     throughput_limit = db.get("throughputMeasurement", {}).get("value", 0)
     # Query Prometheus for each metric
     period = PROM_QUERY_PERIOD
-    prom_url = PROM_SERVER_URL
+    prom_url = PROM_SERVER_URL.get(cluster_label) if isinstance(PROM_SERVER_URL, dict) else PROM_SERVER_URL
     labels = f'cluster="{cluster_label}",bdb="{bdb}"'
     throughput = query_prometheus(prom_url, f'max_over_time(bdb_total_req_max{{{labels}}}[{period}])', bdb=bdb, cluster=cluster_label)
     memory = query_prometheus(prom_url, f'max_over_time(bdb_used_memory{{{labels}}}[{period}])', bdb=bdb, cluster=cluster_label)
@@ -664,10 +666,11 @@ def get_all_metrics(period=None):
             # Downscale suggestion logic (use max_over_time for memory and throughput)
             downscale_memory_mb = None
             downscale_throughput_ops = None
+            prom_url = PROM_SERVER_URL.get(cluster_label) if isinstance(PROM_SERVER_URL, dict) else PROM_SERVER_URL
             if metrics_result['status']['throughput_ok'] and metrics_result['status']['memory_ok'] and metrics_result['status']['cpu_ok'] and metrics_result['status']['latency_ok'] and metrics_result['status']['payload_size_ok']:
                 # Use max_over_time for the period for safe downscale
-                mem_used = query_prometheus(PROM_SERVER_URL, f'max_over_time(bdb_used_memory{{{labels}}}[{prom_period}])', bdb=bdb, cluster=cluster_label) or 0
-                thr_used = query_prometheus(PROM_SERVER_URL, f'max_over_time(bdb_total_req_max{{{labels}}}[{prom_period}])', bdb=bdb, cluster=cluster_label) or 0
+                mem_used = query_prometheus(prom_url, f'max_over_time(bdb_used_memory{{{labels}}}[{prom_period}])', bdb=bdb, cluster=cluster_label) or 0
+                thr_used = query_prometheus(prom_url, f'max_over_time(bdb_total_req_max{{{labels}}}[{prom_period}])', bdb=bdb, cluster=cluster_label) or 0
                 downscale_memory_mb = nice_memory_step(mem_used)
                 downscale_throughput_ops = nice_throughput_step(thr_used)
             metrics_result['downscale_memory_mb'] = downscale_memory_mb
